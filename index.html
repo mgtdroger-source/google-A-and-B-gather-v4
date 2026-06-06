@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>A and B gathering v1</title>
+  <style>
+    :root {
+      --bg: #f3f6fa;
+      --card: #fff;
+      --ink: #132233;
+      --muted: #5c6b7a;
+      --line: #d5dee8;
+      --accent: #123b66;
+      --good: #1f7a35;
+      --warn: #c46a00;
+      --bad: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      padding: 14px;
+    }
+    .app { max-width: 500px; margin: 0 auto; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.05);
+    }
+    h1 { margin: 0 0 4px; font-size: 1.25rem; color: var(--accent); }
+    .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 12px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 12px;
+      padding: 14px;
+      font-size: 0.95rem;
+      font-weight: bold;
+      cursor: pointer;
+      background: var(--accent);
+      color: white;
+    }
+    button:disabled { background: var(--line); color: var(--muted); cursor: not-allowed; }
+    .status-bar {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #eef3f8;
+      font-weight: bold;
+      font-size: 0.9rem;
+      text-align: center;
+    }
+    .metric {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      padding: 8px 0;
+      border-top: 1px solid #edf1f5;
+      font-size: 0.9rem;
+    }
+    .metric:first-of-type { border-top: 0; }
+    .label { color: var(--muted); }
+    .val { font-family: monospace; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+<div class="app">
+  <div class="card">
+    <h1>A and B gathering v1</h1>
+    <div class="sub">Isolated calibration framework for standard mobile hardware.</div>
+    
+    <div class="row">
+      <button id="btnA" onclick="startCapture('A')">Capture Point A</button>
+      <button id="btnB" onclick="startCapture('B')">Capture Point B</button>
+    </div>
+    
+    <div id="engineStatus" class="status-bar">Engine Idle</div>
+  </div>
+
+  <!-- POINT A RESULTS -->
+  <div class="card">
+    <h1>Point A Profile</h1>
+    <div class="metric"><div class="label">Samples:</div><div id="aSamples" class="val">0 / 20</div></div>
+    <div class="metric"><div class="label">Latitude:</div><div id="aLat" class="val">--</div></div>
+    <div class="metric"><div class="label">Longitude:</div><div id="aLon" class="val">--</div></div>
+    <div class="metric"><div class="label">Accuracy:</div><div id="aAcc" class="val">--</div></div>
+  </div>
+
+  <!-- POINT B RESULTS -->
+  <div class="card">
+    <h1>Point B Profile</h1>
+    <div class="metric"><div class="label">Samples:</div><div id="bSamples" class="val">0 / 20</div></div>
+    <div class="metric"><div class="label">Latitude:</div><div id="bLat" class="val">--</div></div>
+    <div class="metric"><div class="label">Longitude:</div><div id="bLon" class="val">--</div></div>
+    <div class="metric"><div class="label">Accuracy:</div><div id="bAcc" class="val">--</div></div>
+  </div>
+
+  <!-- CALCULATED BASELINE -->
+  <div class="card">
+    <h1>Calculated Geometry</h1>
+    <div class="metric"><div class="label">Line Length:</div><div id="lineLen" class="val">--</div></div>
+  </div>
+</div>
+
+<script>
+  const TARGET_SAMPLES = 20;
+  const SETTLE_DELAY_MS = 60000; // 60-second warm-up
+  const ACCURACY_GATE_METERS = 7.0; // Hard rejection threshold for standard chips
+
+  let pointA = null;
+  let pointB = null;
+  let watchId = null;
+  
+  let currentTarget = null;
+  let sampleBuffer = [];
+  let lastSavedSampleTime = 0;
+
+  const $ = id => document.getElementById(id);
+
+  function startCapture(target) {
+    if (watchId) return; // Prevent overlapping runs
+    
+    currentTarget = target;
+    sampleBuffer = [];
+    lastSavedSampleTime = 0;
+    
+    // UI state locking
+    $("btnA").disabled = true;
+    $("btnB").disabled = true;
+    $(target === 'A' ? "aSamples" : "bSamples").innerText = "0 / " + TARGET_SAMPLES;
+    
+    const startTime = Date.now();
+
+    watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const elapsed = Date.now() - startTime;
+        const currentAccuracy = position.coords.accuracy;
+
+        // 1. Enforce the 60-second hardware settling window
+        if (elapsed < SETTLE_DELAY_MS) {
+          const secRemaining = Math.ceil((SETTLE_DELAY_MS - elapsed) / 1000);
+          $("engineStatus").innerText = `[${target}] Settling GPS: ${secRemaining}s remaining (Live Acc: ${currentAccuracy.toFixed(1)}m)`;
+          return;
+        }
+
+        $("engineStatus").innerText = `[${target}] Active Sampling...`;
+
+        // 2. Filter out poor readings (Accuracy Gate)
+        if (currentAccuracy > ACCURACY_GATE_METERS) {
+          $("engineStatus").innerText = `[${target}] Skipped update: poor accuracy (${currentAccuracy.toFixed(1)}m)`;
+          return;
+        }
+
+        // 3. Enforce the 1-second sampling gap (Throttling)
+        const now = Date.now();
+        if (now - lastSavedSampleTime < 1000) {
+          return; 
+        }
+
+        // Save raw valid coordinate point
+        lastSavedSampleTime = now;
+        sampleBuffer.push({
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+          acc: currentAccuracy
+        });
+
+        // Update raw sample counter in UI
+        $(target === 'A' ? "aSamples" : "bSamples").innerText = `${sampleBuffer.length} / ${TARGET_SAMPLES}`;
+
+        // 4. End collection loop when array hits target size
+        if (sampleBuffer.length >= TARGET_SAMPLES) {
+          navigator.geolocation.clearWatch(watchId);
+          watchId = null;
+          processCluster();
+        }
+      },
+      (error) => {
+        $("engineStatus").innerText = "GPS Error: " + error.message;
+        resetEngine();
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+    );
+  }
+
+  function processCluster() {
+    $("engineStatus").innerText = "Processing coordinates...";
+
+    // Math Phase 1: Compute raw center of mass
+    let sumLat = 0;
+    let sumLon = 0;
+    sampleBuffer.forEach(p => {
+      sumLat += p.lat;
+      sumLon += p.lon;
+    });
+    const rawCenter = {
+      lat: sumLat / sampleBuffer.length,
+      lon: sumLon / sampleBuffer.length
+    };
+
+    // Math Phase 2: Compute relative spatial delta distance for sorting
+    sampleBuffer.forEach(p => {
+      const dLat = p.lat - rawCenter.lat;
+      const dLon = p.lon - rawCenter.lon;
+      p.distFromCenter = Math.sqrt(dLat * dLat + dLon * dLon);
+    });
+
+    // Math Phase 3: Distance sorting (Closest to center first)
+    sampleBuffer.sort((a, b) => a.distFromCenter - b.distFromCenter);
+
+    // Math Phase 4: Slicing out the outer 30% noise (Remove furthest 6 points)
+    const stableCore = sampleBuffer.slice(0, 14);
+
+    // Math Phase 5: Final average calculations of the hardened core
+    let finalLat = 0, finalLon = 0, finalAcc = 0;
+    stableCore.forEach(p => {
+      finalLat += p.lat;
+      finalLon += p.lon;
+      finalAcc += p.acc;
+    });
+
+    const result = {
+      lat: finalLat / stableCore.length,
+      lon: finalLon / stableCore.length,
+      acc: finalAcc / stableCore.length
+    };
+
+    // Commit results to profile targets
+    if (currentTarget === 'A') {
+      pointA = result;
+      $("aLat").innerText = result.lat.toFixed(7);
+      $("aLon").innerText = result.lon.toFixed(7);
+      $("aAcc").innerText = result.acc.toFixed(1) + " m (Hardened Core)";
+    } else {
+      pointB = result;
+      $("bLat").innerText = result.lat.toFixed(7);
+      $("bLon").innerText = result.lon.toFixed(7);
+      $("bAcc").innerText = result.acc.toFixed(1) + " m (Hardened Core)";
+    }
+
+    // Compute line parameters if geometry is complete
+    if (pointA && pointB) {
+      const distance = haversineMeters(pointA, pointB);
+      $("lineLen").innerText = distance.toFixed(2) + " meters";
+    }
+
+    resetEngine();
+  }
+
+  function resetEngine() {
+    $("btnA").disabled = false;
+    $("btnB").disabled = false;
+    $("engineStatus").innerText = "Engine Idle";
+  }
+
+  function haversineMeters(a, b) {
+    const R = 6371000;
+    const lat1 = a.lat * Math.PI / 180;
+    const lat2 = b.lat * Math.PI / 180;
+    const dLat = (b.lat - a.lat) * Math.PI / 180;
+    const dLon = (b.lon - a.lon) * Math.PI / 180;
+    const x = dLon * Math.cos((lat1 + lat2) / 2);
+    const y = dLat;
+    return Math.sqrt(x * x + y * y) * R;
+  }
+</script>
+
+</body>
+</html>
