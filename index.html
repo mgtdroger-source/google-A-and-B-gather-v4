@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>A and B gathering v13</title>
+  <style>
+:root {
+  --bg:#f3f6fa;
+  --card:#fff;
+  --ink:#132233;
+  --muted:#5c6b7a;
+  --line:#d5dee8;
+  --accent:#123b66;
+  --good:#1f7a35;
+  --warn:#c46a00;
+  --bad:#b42318;
+  --soft:#eef3f8
+}
+* { box-sizing:border-box; -webkit-user-select:none; user-select:none; }
+body { margin:0; font-family:Arial,sans-serif; background:var(--bg); color:var(--ink) }
+.app { max-width:560px; margin:0 auto; padding:14px }
+.card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px; margin-bottom:12px; box-shadow:0 6px 18px rgba(0,0,0,.07) }
+h1 { margin:0 0 4px; font-size:1.35rem; color:var(--accent) }
+h2 { margin:0 0 10px; font-size:1.05rem; color:var(--accent) }
+.sub { color:var(--muted); font-size:.9rem; line-height:1.35 }
+button { width:100%; border:0; border-radius:14px; padding:14px; margin-top:10px; font-size:1rem; font-weight:bold; cursor:pointer; }
+.btn-primary { background:var(--accent); color:white }
+.btn-secondary { background:var(--soft); color:var(--accent); border:1px solid #cbd7e4 }
+.btn-danger { background:var(--bad); color:white }
+.status { font-weight:bold; font-size:.95rem; margin-top:8px }
+.status.good { color:var(--good) }
+.status.wait { color:var(--warn) }
+.metric { display:grid; grid-template-columns:130px 1fr; gap:8px; padding:8px 0; border-top:1px solid #edf1f5; align-items:center }
+.metric:first-child { border-top:0; }
+.metric-label { color:var(--muted); font-size:.85rem }
+.metric-value { font-family:"Courier New",monospace; font-weight:bold; font-size:1rem }
+.big-result { background:#f7fafc; border:1px solid var(--line); border-radius:14px; padding:12px; margin-top:10px }
+.row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px }
+  </style>
+</head>
+<body>
+<div class="app">
+<div class="card">
+<h1>A and B gathering v13</h1>
+<div class="sub">Production framework hardened against local security boundaries.</div>
+</div>
+<div class="card">
+<h2>1. Timing Line Setup</h2>
+<div class="sub">Capture points using a 60-second settle delay and 4.5m filtering rules. Logs are trimmed to key data.</div>
+<div class="row2">
+<button class="btn-primary" id="captureABtn" onclick="startCapture('A')">Capture Point A</button>
+<button class="btn-primary" id="captureBBtn" onclick="startCapture('B')">Capture Point B</button>
+</div>
+<div class="status wait" id="lineStatus">Line not ready</div>
+<div class="big-result">
+<div class="metric"><div class="metric-label">A Samples</div><div class="metric-value" id="aSamples">0 / 20</div></div>
+<div class="metric"><div class="metric-label">A Accuracy</div><div class="metric-value" id="aAccuracy">--</div></div>
+<div class="metric"><div class="metric-label">A Lat/Lon</div><div class="metric-value" id="aLatLon">--</div></div>
+<div class="metric"><div class="metric-label">B Samples</div><div class="metric-value" id="bSamples">0 / 20</div></div>
+<div class="metric"><div class="metric-label">B Accuracy</div><div class="metric-value" id="bAccuracy">--</div></div>
+<div class="metric"><div class="metric-label">B Lat/Lon</div><div class="metric-value" id="bLatLon">--</div></div>
+<div class="metric"><div class="metric-label">Line Length</div><div class="metric-value" id="lineLength">--</div></div>
+<div class="metric"><div class="metric-label">Settle Timer</div><div class="metric-value" id="skippedFixes">--</div></div>
+</div>
+<button class="btn-secondary" style="margin-top:15px;" id="exportBtn" onclick="exportTestDataJSON()">Export Trimmed JSON</button>
+<button class="btn-danger" id="resetBtn" onclick="resetAppLineData()">Reset Line Data</button>
+</div>
+</div>
+
+<script>
+const CAPTURE_SAMPLES = 20;
+const CAPTURE_SETTLE_MS = 60000;
+const ACCURACY_GATE_METERS = 4.5;
+
+let pointA = null, pointB = null, captureWatchId = null, captureSamples = [], captureTarget = null;
+let lastSampleTime = 0;
+let bestSettleAccuracy = Infinity;
+let testRunRecords = [];
+
+const $ = id => document.getElementById(id);
+
+function startCapture(target) {
+  if (captureWatchId) return;
+
+  // Security validation warning block
+  if (window.location.protocol === "file:") {
+    alert("SECURITY BLOCK:\nYou are running this via file:// layout.\n\nMobile GPS hardware access requires you to open the live 'https://' GitHub Pages link address instead!");
+    return;
+  }
+  
+  captureTarget = target;
+  captureSamples = [];
+  lastSampleTime = 0;
+  bestSettleAccuracy = Infinity;
+  
+  $("captureABtn").disabled = true;
+  $("captureBBtn").disabled = true;
+  $("resetBtn").disabled = true;
+  $(target === 'A' ? "aSamples" : "bSamples").innerText = "0 / 20";
+  
+  const startTime = Date.now();
+  $("skippedFixes").innerText = "60s Warmup...";
+
+  captureWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const elapsed = Date.now() - startTime;
+      const accuracy = pos.coords.accuracy;
+
+      if (accuracy < bestSettleAccuracy) {
+        bestSettleAccuracy = accuracy;
+      }
+
+      if (elapsed < CAPTURE_SETTLE_MS) {
+        const remaining = Math.ceil((CAPTURE_SETTLE_MS - elapsed) / 1000);
+        $("skippedFixes").innerText = `Settle: ${remaining}s`;
+        return;
+      }
+      
+      if (captureSamples.length === 0 && lastSampleTime === 0) {
+        testRunRecords.push({
+          time_stamp: new Date().toISOString().slice(11,23),
+          target: target,
+          state: "SETTLE_SUMMARY",
+          best_observed_acc: parseFloat(bestSettleAccuracy.toFixed(2))
+        });
+        lastSampleTime = 1; 
+      }
+      
+      $("skippedFixes").innerText = "Sampling...";
+      
+      if (accuracy > ACCURACY_GATE_METERS) {
+        testRunRecords.push({
+          time_stamp: new Date().toISOString().slice(11,23),
+          target: target,
+          state: "REJECTED_GATE_EXCEEDED",
+          lat: parseFloat(pos.coords.latitude.toFixed(8)),
+          lon: parseFloat(pos.coords.longitude.toFixed(8)),
+          acc: parseFloat(accuracy.toFixed(2))
+        });
+        return; 
+      }
+      
+      const now = Date.now();
+      if (captureSamples.length > 0 && (now - lastSampleTime < 1000)) {
+        return;
+      }
+      
+      lastSampleTime = now;
+      captureSamples.push({
+        lat: pos.coords.latitude,
+        lon: pos.coords.longitude,
+        acc: accuracy
+      });
+      
+      $(target === 'A' ? "aSamples" : "bSamples").innerText = `${captureSamples.length} / 20`;
+      
+      if (captureSamples.length >= CAPTURE_SAMPLES) {
+        navigator.geolocation.clearWatch(captureWatchId);
+        captureWatchId = null;
+        $("skippedFixes").innerText = "Processing...";
+        processCapturedPoint();
+      }
+    },
+    (err) => {
+      $("skippedFixes").innerText = "Error";
+      resetEngine();
+    },
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+  );
+}
+
+function processCapturedPoint() {
+  let sumLat = 0, sumLon = 0;
+  captureSamples.forEach(p => {
+    sumLat += p.lat;
+    sumLon += p.lon;
+  });
+  
+  // FIXING THE LINE 125 COMPILER CRASH FROM v12 HERE:
+  const rawCenter = {
+    lat: sumLat / captureSamples.length,
+    lon: sumLon / captureSamples.length
+  };
+
+  captureSamples.forEach(p => {
+    const dLat = p.lat - rawCenter.lat;
+    const dLon = p.lon - rawCenter.lon;
+    p.distFromCenter = Math.sqrt(dLat * dLat + dLon * dLon) * 111320;
+  });
+
+  captureSamples.sort((a, b) => a.distFromCenter - b.distFromCenter);
+
+  const stableCore = captureSamples.slice(0, 14);
+  const outerAnomalies = captureSamples.slice(14);
+
+  stableCore.forEach(p => {
+    testRunRecords.push({
+      time_stamp: new Date().toISOString().slice(11,23),
+      target: captureTarget,
+      state: "CORE_RETAINED",
+      lat: parseFloat(p.lat.toFixed(8)),
+      lon: parseFloat(p.lon.toFixed(8)),
+      acc: parseFloat(p.acc.toFixed(2)),
+      drift_m: parseFloat(p.distFromCenter.toFixed(3))
+    });
+  });
+
+  outerAnomalies.forEach(p => {
+    testRunRecords.push({
+      time_stamp: new Date().toISOString().slice(11,23),
+      target: captureTarget,
+      state: "OUTLIER_DROPPED",
+      lat: parseFloat(p.lat.toFixed(8)),
+      lon: parseFloat(p.lon.toFixed(8)),
+      acc: parseFloat(p.acc.toFixed(2)),
+      drift_m: parseFloat(p.distFromCenter.toFixed(3))
+    });
+  });
+
+  let finalLat = 0, finalLon = 0, finalAcc = 0;
+  stableCore.forEach(p => {
+    finalLat += p.lat;
+    finalLon += p.lon;
+    finalAcc += p.acc;
+  });
+
+  const processedPoint = {
+    lat: finalLat / stableCore.length,
+    lon: finalLon / stableCore.length,
+    acc: finalAcc / stableCore.length
+  };
+
+  if (captureTarget === 'A') {
+    pointA = processedPoint;
+    $("aAccuracy").innerText = processedPoint.acc.toFixed(1) + "m";
+    $("aLatLon").innerText = `${processedPoint.lat.toFixed(6)}, ${processedPoint.lon.toFixed(6)}`;
+  } else {
+    pointB = processedPoint;
+    $("bAccuracy").innerText = processedPoint.acc.toFixed(1) + "m";
+    $("bLatLon").innerText = `${processedPoint.lat.toFixed(6)}, ${processedPoint.lon.toFixed(6)}`;
+  }
+
+  testRunRecords.push({
+    time_stamp: new Date().toISOString().slice(11,23),
+    target: captureTarget,
+    state: "FINAL_PROCESSED_RESULT",
+    lat: parseFloat(processedPoint.lat.toFixed(8)),
+    lon: parseFloat(processedPoint.lon.toFixed(8)),
+    acc: parseFloat(processedPoint.acc.toFixed(2))
+  });
+
+  if (pointA && pointB) {
+    const dist = haversineMeters(pointA, pointB);
+    $("lineLength").innerText = dist.toFixed(2) + " m";
+    $("lineStatus").innerText = "Line Ready";
+    $("lineStatus").className = "status good";
+  }
+
+  $("skippedFixes").innerText = "Done";
+  resetEngine();
+}
+
+function resetEngine() {
+  $("captureABtn").disabled = false;
+  $("captureBBtn").disabled = false;
+  $("resetBtn").disabled = false;
+}
+
+function resetAppLineData() {
+  pointA = null;
+  pointB = null;
+  captureSamples = [];
+  testRunRecords = [];
+  
+  $("aSamples").innerText = "0 / 20";
+  $("aAccuracy").innerText = "--";
